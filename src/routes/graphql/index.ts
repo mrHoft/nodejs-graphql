@@ -18,75 +18,10 @@ import { MemberType, MemberTypeIdEnumType } from './types/member.js';
 import { PostType } from './types/post.js';
 import { ProfileType } from './types/profile.js';
 import { UserType } from './types/user.js';
+import { createLoaders } from './loaders.js';
 
 const plugin: FastifyPluginAsyncTypebox = async (fastify) => {
   const { prisma } = fastify;
-
-  const RootQueryType = new GraphQLObjectType({
-    name: 'RootQueryType',
-    fields: {
-      memberTypes: {
-        type: new GraphQLList(MemberType),
-        resolve: () => prisma.memberType.findMany(),
-      },
-      memberType: {
-        type: MemberType,
-        args: {
-          id: { type: new GraphQLNonNull(MemberTypeIdEnumType) },
-        },
-        resolve: (_, { id }: { id: string }) => prisma.memberType.findUnique({ where: { id } }),
-      },
-      users: {
-        type: new GraphQLList(UserType),
-        resolve: () => prisma.user.findMany(),
-      },
-      user: {
-        type: UserType,
-        args: {
-          id: { type: new GraphQLNonNull(UUIDType) },
-        },
-        resolve: (_, { id }: { id: string }) => prisma.user.findUnique({ where: { id } }),
-      },
-      posts: {
-        type: new GraphQLList(PostType),
-        resolve: () => prisma.post.findMany(),
-      },
-      post: {
-        type: PostType,
-        args: {
-          id: { type: new GraphQLNonNull(UUIDType) },
-        },
-        resolve: (_, { id }: { id: string }) => prisma.post.findUnique({ where: { id } }),
-      },
-      profiles: {
-        type: new GraphQLList(ProfileType),
-        resolve: () => prisma.profile.findMany(),
-      },
-      profile: {
-        type: ProfileType,
-        args: {
-          id: { type: new GraphQLNonNull(UUIDType) },
-        },
-        resolve: (_, { id }: { id: string }) => prisma.profile.findUnique({ where: { id } }),
-      },
-      subscriptions: {
-        type: new GraphQLList(new GraphQLObjectType({
-          name: 'Subscription',
-          fields: {
-            subscriber: { type: UserType },
-            author: { type: UserType },
-            createdAt: { type: GraphQLString },
-          },
-        })),
-        resolve: () => prisma.subscribersOnAuthors.findMany({
-          include: {
-            subscriber: true,
-            author: true,
-          },
-        }),
-      },
-    },
-  });
 
   const Mutations = new GraphQLObjectType({
     name: 'Mutations',
@@ -300,8 +235,48 @@ const plugin: FastifyPluginAsyncTypebox = async (fastify) => {
   });
 
   const schema = new GraphQLSchema({
-    query: RootQueryType,
-    mutation: Mutations,
+    query: new GraphQLObjectType({
+      name: 'Query',
+      fields: {
+        memberTypes: {
+          type: new GraphQLList(MemberType),
+          resolve: (_, __, { loaders }) => loaders.memberTypes.load('ALL')
+        },
+        memberType: {
+          type: MemberType,
+          args: { id: { type: new GraphQLNonNull(MemberTypeIdEnumType) } },
+          resolve: (_, { id }, { loaders }) => loaders.memberTypes.load(id)
+        },
+        users: {
+          type: new GraphQLList(UserType),
+          resolve: (_, __, { loaders }) => loaders.users.load('ALL')
+        },
+        user: {
+          type: UserType,
+          args: { id: { type: new GraphQLNonNull(UUIDType) } },
+          resolve: (_, { id }, { loaders }, info) => loaders.usersWithSubs.load({ id, info })
+        },
+        posts: {
+          type: new GraphQLList(PostType),
+          resolve: (_, __, { loaders }) => loaders.posts.load('ALL')
+        },
+        post: {
+          type: PostType,
+          args: { id: { type: new GraphQLNonNull(UUIDType) } },
+          resolve: (_, { id }, { loaders }) => loaders.posts.load(id)
+        },
+        profiles: {
+          type: new GraphQLList(ProfileType),
+          resolve: (_, __, { loaders }) => loaders.profiles.load('ALL')
+        },
+        profile: {
+          type: ProfileType,
+          args: { id: { type: new GraphQLNonNull(UUIDType) } },
+          resolve: (_, { id }, { loaders }) => loaders.profiles.load(id)
+        }
+      }
+    }),
+    mutation: Mutations
   });
 
   fastify.route({
@@ -314,7 +289,8 @@ const plugin: FastifyPluginAsyncTypebox = async (fastify) => {
       },
     },
     async handler(req) {
-      const depthLimitRule = depthLimit(5)
+      const depthLimitRule = depthLimit(5);
+      const loaders = createLoaders(prisma);
 
       try {
         const document = parse(req.body.query);
@@ -324,11 +300,23 @@ const plugin: FastifyPluginAsyncTypebox = async (fastify) => {
           return { errors: validationErrors };
         }
 
+        const shouldPreload = document.definitions.some(def =>
+          def.kind === 'OperationDefinition' &&
+          def.selectionSet.selections.some(sel =>
+            sel.kind === 'Field' &&
+            ['users', 'posts', 'profiles', 'memberTypes'].includes(sel.name.value)
+          )
+        );
+
+        if (shouldPreload) {
+          await loaders.preloadAllData();
+        }
+
         return await execute({
           schema,
           document,
           variableValues: req.body.variables,
-          contextValue: { prisma },
+          contextValue: { prisma, loaders, __debug: () => console.log('CONTEXT VERIFIED') },
         });
       } catch (error) {
         return { errors: [error] };

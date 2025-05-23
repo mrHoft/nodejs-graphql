@@ -14,11 +14,8 @@ import {
   GraphQLInputObjectType
 } from 'graphql';
 import { UUIDType } from './types/uuid.js';
-import { MemberType, MemberTypeIdEnumType } from './types/member.js';
-import { PostType } from './types/post.js';
-import { ProfileType } from './types/profile.js';
-import { UserType } from './types/user.js';
-import { createLoaders } from './loaders.js';
+import { createLoaders, preloadData } from './loaders.js';
+import { MemberType, MemberTypeIdEnumType, PostType, ProfileType, UserType } from './types/schema.js';
 
 const plugin: FastifyPluginAsyncTypebox = async (fastify) => {
   const { prisma } = fastify;
@@ -190,7 +187,6 @@ const plugin: FastifyPluginAsyncTypebox = async (fastify) => {
           authorId: { type: new GraphQLNonNull(UUIDType) },
         },
         resolve: async (_, { userId, authorId }) => {
-          // Check if subscription already exists
           const existing = await prisma.subscribersOnAuthors.findUnique({
             where: {
               subscriberId_authorId: {
@@ -249,12 +245,28 @@ const plugin: FastifyPluginAsyncTypebox = async (fastify) => {
         },
         users: {
           type: new GraphQLList(UserType),
-          resolve: (_, __, { loaders }) => loaders.users.load('ALL')
+          resolve: async (_, __, { loaders }) => {
+            try {
+              const users = await loaders.users.load('ALL');
+
+              console.log('Resolver received:', users?.length ?? 0, 'users');
+
+              if (!Array.isArray(users)) {
+                console.error('Expected array, got:', typeof users);
+                return [];
+              }
+
+              return users;
+            } catch (err) {
+              console.error('Error in users resolver:', (err instanceof Error) ? err.message : err);
+              return [];
+            }
+          }
         },
         user: {
           type: UserType,
           args: { id: { type: new GraphQLNonNull(UUIDType) } },
-          resolve: (_, { id }, { loaders }, info) => loaders.usersWithSubs.load({ id, info })
+          resolve: (_, { id }, { loaders }, info) => loaders.users.load({ id, info })
         },
         posts: {
           type: new GraphQLList(PostType),
@@ -299,7 +311,7 @@ const plugin: FastifyPluginAsyncTypebox = async (fastify) => {
         if (validationErrors.length > 0) {
           return { errors: validationErrors };
         }
-
+        /* 
         const shouldPreload = document.definitions.some(def =>
           def.kind === 'OperationDefinition' &&
           def.selectionSet.selections.some(sel =>
@@ -310,13 +322,14 @@ const plugin: FastifyPluginAsyncTypebox = async (fastify) => {
 
         if (shouldPreload) {
           await loaders.preloadAllData();
-        }
+        } */
+        await preloadData(loaders);
 
         return await execute({
           schema,
           document,
           variableValues: req.body.variables,
-          contextValue: { prisma, loaders, __debug: () => console.log('CONTEXT VERIFIED') },
+          contextValue: { prisma, loaders },
         });
       } catch (error) {
         return { errors: [error] };

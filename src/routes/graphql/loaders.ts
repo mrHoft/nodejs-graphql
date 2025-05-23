@@ -9,30 +9,29 @@ type Subscription = Awaited<ReturnType<PrismaClient['subscribersOnAuthors']['fin
 };
 
 type UserWithSubs = Awaited<ReturnType<PrismaClient['user']['findUnique']>> & {
+  posts?: any[];
+  profile?: {
+    id: string;
+    memberType: {
+      id: string;
+    } | null;
+  } | null;
   userSubscribedTo?: Subscription[];
   subscribedToUser?: Subscription[];
-};
-
-type UserLoaderArgs = {
-  id: string;
-  info?: GraphQLResolveInfo;
 };
 
 export function createLoaders(prisma: PrismaClient) {
   let isPreloaded = false;
 
-  // Cache for all entities
   const cache = {
-    users: [] as any[],
+    users: [] as UserWithSubs[],
     posts: [] as any[],
     profiles: [] as any[],
     memberTypes: [] as any[],
   };
 
-  // Mock Prisma client that returns cached data after preload
   const cachedPrisma = new Proxy(prisma, {
     get(target, prop) {
-      // After preloading, return cached data for find methods
       if (isPreloaded) {
         if (prop === 'user') return { findMany: () => Promise.resolve(cache.users) };
         if (prop === 'post') return { findMany: () => Promise.resolve(cache.posts) };
@@ -44,143 +43,166 @@ export function createLoaders(prisma: PrismaClient) {
   });
 
   const loaders = {
-    users: new DataLoader(async (ids: readonly string[]) => {
-      if (!isPreloaded && (ids.includes('ALL') || cache.users.length === 0)) {
-        cache.users = await cachedPrisma.user.findMany({
-          include: {
-            posts: true,
-            profile: { include: { memberType: true } }
-          }
-        });
-
-        // Prime related loaders
-        cache.users.forEach(user => {
-          user.posts?.forEach(post => loaders.posts.prime(post.id, post));
-          if (user.profile) {
-            loaders.profiles.prime(user.profile.id, user.profile);
-            if (user.profile.memberType) {
-              loaders.memberTypes.prime(user.profile.memberType.id, user.profile.memberType);
+    users: new DataLoader<{ id: string; info?: GraphQLResolveInfo } | string, UserWithSubs | UserWithSubs[] | null>(async (keys) => {
+      if (keys[0] === 'ALL') {
+        if (!isPreloaded && cache.users.length === 0) {
+          cache.users = await cachedPrisma.user.findMany({
+            include: {
+              posts: true,
+              profile: { include: { memberType: true } },
+              userSubscribedTo: { include: { author: true } },
+              subscribedToUser: { include: { subscriber: true } },
             }
-          }
-        });
+          });
+        }
+
+        return [cache.users];
       }
+      const ids = keys.map(k => (typeof k === 'string' ? k : k.id));
 
-      return ids.map(id =>
-        id === 'ALL' ? cache.users : cache.users.find(user => user.id === id) ?? null
-      );
-    }),
-
-    usersWithSubs: new DataLoader<UserLoaderArgs, UserWithSubs | null>(async (args) => {
-      const ids = args.map(arg => arg.id);
-
-      // Try to use cached users first
-      if (isPreloaded) {
-        return args.map(arg =>
-          cache.users.find(user => user.id === arg.id) ?? null
-        );
-      }
-
-      const needsSubs = args.some(arg => {
-        if (!arg.info) return false;
-        const parsedInfo = parseResolveInfo(arg.info) as ResolveTree;
-        return !!parsedInfo.fieldsByTypeName.User.userSubscribedTo ||
-          !!parsedInfo.fieldsByTypeName.User.subscribedToUser;
-      });
-
-      const users = await cachedPrisma.user.findMany({
+      const users = await prisma.user.findMany({
         where: { id: { in: ids } },
         include: {
           posts: true,
           profile: { include: { memberType: true } },
-          ...(needsSubs ? {
-            userSubscribedTo: { include: { author: true } },
-            subscribedToUser: { include: { subscriber: true } }
-          } : {})
-        }
-      }) as UserWithSubs[];
+          userSubscribedTo: {
+            include: {
+              author: {
+                include: {
+                  subscribedToUser: { include: { subscriber: true } },
+                },
+              },
+            },
+          },
+          subscribedToUser: { include: { subscriber: true } },
+        },
+      });
 
-      return args.map(arg => users.find(user => user.id === arg.id) ?? null);
-    }),
 
-    memberTypes: new DataLoader(async (ids: readonly string[]) => {
-      if (!isPreloaded && (ids.includes('ALL') || cache.memberTypes.length === 0)) {
-        cache.memberTypes = await cachedPrisma.memberType.findMany();
-      }
-      return ids.map(id =>
-        id === 'ALL' ? cache.memberTypes : cache.memberTypes.find(mt => mt.id === id) ?? null
-      );
-    }),
+      const usersMap = Object.fromEntries(users.map(u => [u.id, u]));
 
-    posts: new DataLoader(async (ids: readonly string[]) => {
-      if (!isPreloaded && (ids.includes('ALL') || cache.posts.length === 0)) {
+      return keys.map(k => {
+        const id = typeof k === 'string' ? k : k.id;
+        return usersMap[id] ?? null;
+      });
+    }
+    ),
+
+    posts: new DataLoader<string, any | null>(async (ids) => {
+      if (!isPreloaded && ids.includes('ALL') && cache.posts.length === 0) {
         cache.posts = await cachedPrisma.post.findMany();
       }
-      return ids.map(id =>
-        id === 'ALL' ? cache.posts : cache.posts.find(post => post.id === id) ?? null
-      );
+
+      const postMap = Object.fromEntries(cache.posts.map(p => [p.id, p]));
+
+      return ids.map(id => {
+        if (id === 'ALL') return [...cache.posts];
+        return postMap[id] ?? null;
+      });
     }),
 
-    profiles: new DataLoader(async (ids: readonly string[]) => {
-      if (!isPreloaded && (ids.includes('ALL') || cache.profiles.length === 0)) {
-        cache.profiles = await cachedPrisma.profile.findMany({
-          include: { memberType: true }
-        });
-
-        // Prime memberTypes
-        cache.profiles.forEach(profile => {
-          if (profile.memberType) {
-            loaders.memberTypes.prime(profile.memberType.id, profile.memberType);
-          }
-        });
+    profiles: new DataLoader<string, any>(async (ids) => {
+      if (!isPreloaded && ids.includes('ALL') && cache.profiles.length === 0) {
+        cache.profiles = await cachedPrisma.profile.findMany({ include: { memberType: true } });
       }
-      return ids.map(id =>
-        id === 'ALL' ? cache.profiles : cache.profiles.find(profile => profile.id === id) ?? null
-      );
+
+      const profileMap = Object.fromEntries(cache.profiles.map(p => [p.id, p]));
+
+      return ids.map(id => {
+        if (id === 'ALL') return [...cache.profiles];
+        return profileMap[id] ?? null;
+      });
     }),
 
-    userSubscriptions: new DataLoader(async (userIds: readonly string[]) => {
-      if (isPreloaded) return userIds.map(() => []);
+    memberTypes: new DataLoader<string, any>(async (ids) => {
+      if (!isPreloaded && ids.includes('ALL') && cache.memberTypes.length === 0) {
+        cache.memberTypes = await cachedPrisma.memberType.findMany();
+      }
 
-      const subscriptions = await cachedPrisma.subscribersOnAuthors.findMany({
-        where: { subscriberId: { in: userIds as string[] } },
-        include: { author: true }
+      return ids.map(id => {
+        if (id === 'ALL') {
+          return [...cache.memberTypes];
+        }
+        const item = cache.memberTypes.find(mt => mt.id === id) ?? null;
+        return item;
       });
-
-      const map = new Map<string, typeof subscriptions>();
-      userIds.forEach(id => map.set(id, []));
-      subscriptions.forEach(sub => map.get(sub.subscriberId)?.push(sub));
-
-      return userIds.map(id => map.get(id) || []);
-    }),
-
-    userSubscribers: new DataLoader(async (userIds: readonly string[]) => {
-      if (isPreloaded) return userIds.map(() => []);
-
-      const subscribers = await cachedPrisma.subscribersOnAuthors.findMany({
-        where: { authorId: { in: userIds as string[] } },
-        include: { subscriber: true }
-      });
-
-      const map = new Map<string, typeof subscribers>();
-      userIds.forEach(id => map.set(id, []));
-      subscribers.forEach(sub => map.get(sub.authorId)?.push(sub));
-
-      return userIds.map(id => map.get(id) || []);
     }),
 
     async preloadAllData() {
-      if (isPreloaded) return;
+      if (isPreloaded) return cache.users.length;
 
-      await Promise.all([
-        loaders.users.load('ALL'),
-        loaders.posts.load('ALL'),
-        loaders.profiles.load('ALL'),
-        loaders.memberTypes.load('ALL')
-      ]);
+      cache.users = await cachedPrisma.user.findMany({
+        include: {
+          posts: true,
+          profile: { include: { memberType: true } },
+          userSubscribedTo: {
+            include: {
+              author: {
+                include: { subscribedToUser: { include: { subscriber: true } } }
+              }
+            }
+          },
+          subscribedToUser: true,
+        },
+      });
+
+      cache.users.forEach(user => {
+        loaders.users.prime(user.id, {
+          ...user,
+          userSubscribedTo: user.userSubscribedTo ?? [],
+          subscribedToUser: user.subscribedToUser ?? [],
+        });
+
+        if (user.profile) {
+          loaders.profiles.prime(user.id, user.profile);
+
+          if (user.profile.memberType) {
+            loaders.memberTypes.prime(user.profile.memberType.id, user.profile.memberType);
+          }
+        }
+
+        if (user.posts?.length) {
+          user.posts.forEach(post => {
+            loaders.posts.prime(post.authorId, [post]);
+          });
+        } else {
+          loaders.posts.prime(user.id, []);
+        }
+      });
+
+      cache.posts = await cachedPrisma.post.findMany();
+      cache.posts.forEach(post => {
+        loaders.posts.prime(post.id, post);
+      });
+
+      cache.profiles = await cachedPrisma.profile.findMany({
+        include: { memberType: true }
+      });
+
+      cache.profiles.forEach(profile => {
+        loaders.profiles.prime(profile.id, profile);
+        if (profile.memberType) {
+          loaders.memberTypes.prime(profile.memberType.id, profile.memberType);
+        }
+      });
+
+      cache.memberTypes = await cachedPrisma.memberType.findMany();
+      cache.memberTypes.forEach(mt => { loaders.memberTypes.prime(mt.id, mt) });
 
       isPreloaded = true;
-    }
+
+      return cache.users.length
+    },
   };
 
   return loaders;
+}
+
+export async function preloadData(loaders: { preloadAllData: () => Promise<number> }) {
+  const start = Date.now();
+
+  const usersCount = await loaders.preloadAllData();
+
+  const duration = Date.now() - start;
+  console.log(`Preloaded data in ${duration}ms. Users total: ${usersCount}`);
 }

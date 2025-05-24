@@ -20,6 +20,56 @@ import { MemberType, MemberTypeIdEnumType, PostType, ProfileType, UserType } fro
 const plugin: FastifyPluginAsyncTypebox = async (fastify) => {
   const { prisma } = fastify;
 
+  const QueryObjectType = new GraphQLObjectType({
+    name: 'Query',
+    fields: {
+      memberTypes: {
+        type: new GraphQLList(MemberType),
+        resolve: (_, __, { loaders }) => loaders.memberTypes.load('ALL')
+      },
+      memberType: {
+        type: MemberType,
+        args: { id: { type: new GraphQLNonNull(MemberTypeIdEnumType) } },
+        resolve: (_, { id }, { loaders }) => loaders.memberTypes.load(id)
+      },
+      users: {
+        type: new GraphQLList(UserType),
+        resolve: async (_, __, { loaders }) => {
+          try {
+            const users = await loaders.users.load('ALL');
+            return users;
+          } catch (err) {
+            console.error('Error in users resolver:', (err instanceof Error) ? err.message : err);
+            return [];
+          }
+        }
+      },
+      user: {
+        type: UserType,
+        args: { id: { type: new GraphQLNonNull(UUIDType) } },
+        resolve: (_, { id }, { loaders }, info) => loaders.users.load({ id, info })
+      },
+      posts: {
+        type: new GraphQLList(PostType),
+        resolve: (_, __, { loaders }) => loaders.posts.load('ALL')
+      },
+      post: {
+        type: PostType,
+        args: { id: { type: new GraphQLNonNull(UUIDType) } },
+        resolve: (_, { id }, { loaders }) => loaders.posts.load(id)
+      },
+      profiles: {
+        type: new GraphQLList(ProfileType),
+        resolve: (_, __, { loaders }) => loaders.profiles.load('ALL')
+      },
+      profile: {
+        type: ProfileType,
+        args: { id: { type: new GraphQLNonNull(UUIDType) } },
+        resolve: (_, { id }, { loaders }) => loaders.profiles.load(id)
+      }
+    }
+  });
+
   const Mutations = new GraphQLObjectType({
     name: 'Mutations',
     fields: {
@@ -231,63 +281,7 @@ const plugin: FastifyPluginAsyncTypebox = async (fastify) => {
   });
 
   const schema = new GraphQLSchema({
-    query: new GraphQLObjectType({
-      name: 'Query',
-      fields: {
-        memberTypes: {
-          type: new GraphQLList(MemberType),
-          resolve: (_, __, { loaders }) => loaders.memberTypes.load('ALL')
-        },
-        memberType: {
-          type: MemberType,
-          args: { id: { type: new GraphQLNonNull(MemberTypeIdEnumType) } },
-          resolve: (_, { id }, { loaders }) => loaders.memberTypes.load(id)
-        },
-        users: {
-          type: new GraphQLList(UserType),
-          resolve: async (_, __, { loaders }) => {
-            try {
-              const users = await loaders.users.load('ALL');
-
-              console.log('Resolver received:', users?.length ?? 0, 'users');
-
-              if (!Array.isArray(users)) {
-                console.error('Expected array, got:', typeof users);
-                return [];
-              }
-
-              return users;
-            } catch (err) {
-              console.error('Error in users resolver:', (err instanceof Error) ? err.message : err);
-              return [];
-            }
-          }
-        },
-        user: {
-          type: UserType,
-          args: { id: { type: new GraphQLNonNull(UUIDType) } },
-          resolve: (_, { id }, { loaders }, info) => loaders.users.load({ id, info })
-        },
-        posts: {
-          type: new GraphQLList(PostType),
-          resolve: (_, __, { loaders }) => loaders.posts.load('ALL')
-        },
-        post: {
-          type: PostType,
-          args: { id: { type: new GraphQLNonNull(UUIDType) } },
-          resolve: (_, { id }, { loaders }) => loaders.posts.load(id)
-        },
-        profiles: {
-          type: new GraphQLList(ProfileType),
-          resolve: (_, __, { loaders }) => loaders.profiles.load('ALL')
-        },
-        profile: {
-          type: ProfileType,
-          args: { id: { type: new GraphQLNonNull(UUIDType) } },
-          resolve: (_, { id }, { loaders }) => loaders.profiles.load(id)
-        }
-      }
-    }),
+    query: QueryObjectType,
     mutation: Mutations
   });
 
@@ -311,18 +305,7 @@ const plugin: FastifyPluginAsyncTypebox = async (fastify) => {
         if (validationErrors.length > 0) {
           return { errors: validationErrors };
         }
-        /* 
-        const shouldPreload = document.definitions.some(def =>
-          def.kind === 'OperationDefinition' &&
-          def.selectionSet.selections.some(sel =>
-            sel.kind === 'Field' &&
-            ['users', 'posts', 'profiles', 'memberTypes'].includes(sel.name.value)
-          )
-        );
 
-        if (shouldPreload) {
-          await loaders.preloadAllData();
-        } */
         await preloadData(loaders);
 
         return await execute({
